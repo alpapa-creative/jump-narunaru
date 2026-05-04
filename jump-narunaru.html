@@ -415,48 +415,39 @@
             return;
         }
 
-        const callbackName = `jn46Callback_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
-        const script = document.createElement('script');
         const query = buildApiQuery({
             ...params,
-            callback: callbackName,
             t: Date.now().toString()
         });
 
-        let finished = false;
-        const cleanup = () => {
-            if (finished) return;
-            finished = true;
-            clearTimeout(timeoutId);
-            delete window[callbackName];
-            if (script.parentNode) script.parentNode.removeChild(script);
-        };
-
-        const timeoutId = setTimeout(() => {
-            cleanup();
-            onError('通信がタイムアウトしました。もう一度お試しください');
-        }, 30000);
-
-        window[callbackName] = (payload) => {
-            cleanup();
-            if (!payload || payload.ok === false) {
-                onError(payload && payload.error ? payload.error : 'ランキングAPIでエラーが発生しました');
-                return;
-            }
-            onSuccess(payload);
-        };
-
-        script.onerror = () => {
-            cleanup();
-            console.warn('Ranking API script load failed:', script.src);
-            onError('ランキングAPIに接続できませんでした');
-        };
-
         const separator = SHEET_API_URL.indexOf('?') === -1 ? '?' : '&';
-        script.async = true;
-        script.referrerPolicy = 'no-referrer';
-        script.src = `${SHEET_API_URL}${separator}${query}`;
-        document.head.appendChild(script);
+        const url = `${SHEET_API_URL}${separator}${query}`;
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+        fetch(url, { signal: controller.signal })
+            .then(response => {
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                return response.json();
+            })
+            .then(payload => {
+                clearTimeout(timeoutId);
+                if (!payload || payload.ok === false) {
+                    onError(payload && payload.error ? payload.error : 'ランキングAPIでエラーが発生しました');
+                    return;
+                }
+                onSuccess(payload);
+            })
+            .catch(error => {
+                clearTimeout(timeoutId);
+                if (error.name === 'AbortError') {
+                    onError('通信がタイムアウトしました。もう一度お試しください');
+                } else {
+                    console.warn('Ranking API error:', error);
+                    onError('ランキングAPIに接続できませんでした');
+                }
+            });
     }
 
     function loadRanking(force = false) {
