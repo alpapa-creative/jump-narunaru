@@ -1,0 +1,1243 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>JUMP NARUNARU</title>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@700;900&family=Noto+Sans+JP:wght@700;900&display=swap" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #212529;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            font-family: 'Montserrat', 'Noto Sans JP', sans-serif;
+        }
+        canvas {
+            background-color: #f8f9fa;
+            box-shadow: 0 0 20px rgba(0,0,0,0.8);
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            touch-action: none;
+        }
+    </style>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    const WIDTH = 400;
+    const HEIGHT = 650;
+    canvas.width = WIDTH;
+    canvas.height = HEIGHT;
+
+    // --- ゲーム設定・定数 ---
+    const ACCENT_COLOR = '#E63946';
+    const TEXT_COLOR = '#212529';
+
+    // Google Apps Script のウェブアプリURLを設定するとランキング登録が有効になります。
+    // 例: const SHEET_API_URL = 'https://script.google.com/macros/s/xxxx/exec';
+    const SHEET_API_URL = 'https://script.google.com/macros/s/AKfycbxxqxvYZRQafob5lhhvf0bTEPwV7Ev-49ZDY6bfOyHehZXPyZvaYBzv2f1PhAiPMF5a/exec';
+    const RANKING_LIMIT = 10;
+    const PLAYER_NORMAL_IMAGE_SRC = 'NARUNARU_transparent.png';
+    const PLAYER_JUMP_IMAGE_SRC = 'NARUNARU_JUMP_transparent.png';
+    const PLAYER_SPRITE_HEIGHT = 94;
+    const PLAYER_JUMP_SPRITE_HEIGHT = 96;
+    const PLAYER_SPRITE_FOOT_OFFSET = 4;
+    
+    // ★ ジャンプスピードのさらなる調整 ★
+    // 重力とジャンプ力をさらに上げ、かなりキビキビ動くように
+    const GRAVITY = 1.3;      // 旧: 0.9
+    const JUMP_FORCE = -19.5; // 旧: -16.5
+    
+    const TIME_LIMIT = 46.0;
+    const BONUS_TIME = 30.0;
+    const BREAKABLE_VANISH_DELAY = 5000;
+    const BREAKABLE_RESPAWN_DELAY = 3000;
+
+    // --- ゲーム状態変数 ---
+    let state = 'TITLE';
+    let time = TIME_LIMIT;
+    let startTime = 0;
+    let maxFloor = 0;
+    let bestFloor = Number(localStorage.getItem('sn46_best') || 0);
+    let resultTime = 0;
+    let resultType = "";
+    let playerName = localStorage.getItem('jn46_player_name') || "";
+    
+    // プレイスタイル分析用変数
+    let missCount = 0;
+    let jumpCount = 0;
+
+    let cameraY = 0;
+    let platforms = [];
+    let lastSafeFloor = null;
+    let showMissText = 0;
+    let bonusTextTimer = 0;
+    let rankingData = [];
+    let rankingStatus = 'ランキング未読込';
+    let rankingLoading = false;
+    let rankingLastLoadedAt = 0;
+    let submitStatus = '';
+    let scoreSubmitted = false;
+    let isSubmittingScore = false;
+    let submittedScoreKey = '';
+    let hitAreas = {};
+
+    let player = {
+        x: WIDTH / 2 - 10,
+        y: 0,
+        width: 20,
+        height: 20,
+        vy: 0,
+        oldY: 0,
+        isGrounded: true,
+        currentPlatform: null,
+        offsetX: 0 
+    };
+
+    let playerSprites = {
+        normal: { image: null, source: null, ready: false },
+        jump: { image: null, source: null, ready: false }
+    };
+
+    function loadPlayerSprite(key, src) {
+        const image = new Image();
+        playerSprites[key].image = image;
+        image.onload = () => {
+            try {
+                playerSprites[key].source = createTransparentSprite(image);
+            } catch (error) {
+                playerSprites[key].source = image;
+            }
+            playerSprites[key].ready = true;
+        };
+        image.onerror = () => {
+            playerSprites[key].ready = false;
+        };
+        image.src = src;
+    }
+
+    function createTransparentSprite(image) {
+        const sourceWidth = image.naturalWidth || image.width;
+        const sourceHeight = image.naturalHeight || image.height;
+        const workCanvas = document.createElement('canvas');
+        const workCtx = workCanvas.getContext('2d');
+
+        workCanvas.width = sourceWidth;
+        workCanvas.height = sourceHeight;
+        workCtx.drawImage(image, 0, 0);
+
+        const imageData = workCtx.getImageData(0, 0, sourceWidth, sourceHeight);
+        const data = imageData.data;
+        const visited = new Uint8Array(sourceWidth * sourceHeight);
+        const queue = new Int32Array(sourceWidth * sourceHeight);
+        let head = 0;
+        let tail = 0;
+
+        const isBackgroundPixel = (pixelIndex) => {
+            const dataIndex = pixelIndex * 4;
+            const r = data[dataIndex];
+            const g = data[dataIndex + 1];
+            const b = data[dataIndex + 2];
+            const a = data[dataIndex + 3];
+            const max = Math.max(r, g, b);
+            const min = Math.min(r, g, b);
+
+            return a === 0 || (r > 205 && g > 205 && b > 205 && max - min < 24);
+        };
+
+        const enqueue = (pixelIndex) => {
+            if (visited[pixelIndex] || !isBackgroundPixel(pixelIndex)) return;
+            visited[pixelIndex] = 1;
+            queue[tail++] = pixelIndex;
+        };
+
+        for (let x = 0; x < sourceWidth; x++) {
+            enqueue(x);
+            enqueue((sourceHeight - 1) * sourceWidth + x);
+        }
+        for (let y = 0; y < sourceHeight; y++) {
+            enqueue(y * sourceWidth);
+            enqueue(y * sourceWidth + sourceWidth - 1);
+        }
+
+        while (head < tail) {
+            const pixelIndex = queue[head++];
+            const x = pixelIndex % sourceWidth;
+            const y = Math.floor(pixelIndex / sourceWidth);
+            data[pixelIndex * 4 + 3] = 0;
+
+            if (x > 0) enqueue(pixelIndex - 1);
+            if (x < sourceWidth - 1) enqueue(pixelIndex + 1);
+            if (y > 0) enqueue(pixelIndex - sourceWidth);
+            if (y < sourceHeight - 1) enqueue(pixelIndex + sourceWidth);
+        }
+
+        let minX = sourceWidth;
+        let minY = sourceHeight;
+        let maxX = 0;
+        let maxY = 0;
+        for (let y = 0; y < sourceHeight; y++) {
+            for (let x = 0; x < sourceWidth; x++) {
+                if (data[(y * sourceWidth + x) * 4 + 3] > 8) {
+                    minX = Math.min(minX, x);
+                    minY = Math.min(minY, y);
+                    maxX = Math.max(maxX, x);
+                    maxY = Math.max(maxY, y);
+                }
+            }
+        }
+
+        if (minX > maxX || minY > maxY) return image;
+
+        workCtx.putImageData(imageData, 0, 0);
+
+        const croppedCanvas = document.createElement('canvas');
+        const croppedCtx = croppedCanvas.getContext('2d');
+        const croppedWidth = maxX - minX + 1;
+        const croppedHeight = maxY - minY + 1;
+
+        croppedCanvas.width = croppedWidth;
+        croppedCanvas.height = croppedHeight;
+        croppedCtx.drawImage(
+            workCanvas,
+            minX,
+            minY,
+            croppedWidth,
+            croppedHeight,
+            0,
+            0,
+            croppedWidth,
+            croppedHeight
+        );
+
+        return croppedCanvas;
+    }
+
+    function drawPlayer() {
+        const spriteKey = player.isGrounded ? 'normal' : 'jump';
+        const sprite = playerSprites[spriteKey];
+        const source = sprite && sprite.ready ? sprite.source : null;
+
+        if (source) {
+            const sourceWidth = source.width || source.naturalWidth;
+            const sourceHeight = source.height || source.naturalHeight;
+            const drawHeight = player.isGrounded ? PLAYER_SPRITE_HEIGHT : PLAYER_JUMP_SPRITE_HEIGHT;
+            const drawWidth = drawHeight * (sourceWidth / sourceHeight);
+            const drawX = player.x + player.width / 2 - drawWidth / 2;
+            const drawY = player.y + player.height - drawHeight + PLAYER_SPRITE_FOOT_OFFSET;
+
+            ctx.save();
+            ctx.imageSmoothingEnabled = false;
+            ctx.drawImage(source, drawX, drawY, drawWidth, drawHeight);
+            ctx.restore();
+            return;
+        }
+
+        ctx.fillStyle = ACCENT_COLOR;
+        ctx.fillRect(player.x, player.y, player.width, player.height);
+    }
+
+    loadPlayerSprite('normal', PLAYER_NORMAL_IMAGE_SRC);
+    loadPlayerSprite('jump', PLAYER_JUMP_IMAGE_SRC);
+
+    // --- BGM・効果音 ---
+    let audioCtx = null;
+    let isMuted = localStorage.getItem('jn46_muted') === '1';
+    let bgmTimer = null;
+    let bgmStep = 0;
+    const BGM_STEP_MS = 145;
+    const BGM_MELODY = [
+        0, 659, 0, 784, 880, 0, 784, 659,
+        587, 0, 659, 784, 0, 587, 523, 0,
+        0, 659, 784, 987, 880, 0, 784, 659,
+        698, 0, 659, 587, 523, 0, 0, 0
+    ];
+    const BGM_BASS = [
+        164, 0, 0, 0, 196, 0, 0, 0,
+        220, 0, 0, 0, 196, 0, 0, 0
+    ];
+
+    function ensureAudio() {
+        const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextConstructor) return null;
+        if (!audioCtx) {
+            audioCtx = new AudioContextConstructor();
+        }
+        if (audioCtx.state === 'suspended') {
+            audioCtx.resume();
+        }
+        if (!isMuted) {
+            startBgm();
+        }
+        return audioCtx;
+    }
+
+    function playTone(frequency, startOffset, duration, options = {}) {
+        if (isMuted) return;
+
+        const ctxAudio = ensureAudio();
+        if (!ctxAudio) return;
+
+        const startTime = ctxAudio.currentTime + startOffset;
+        const oscillator = ctxAudio.createOscillator();
+        const gain = ctxAudio.createGain();
+        const endFrequency = options.endFrequency || frequency;
+        const volume = options.volume || 0.16;
+
+        oscillator.type = options.type || 'square';
+        oscillator.frequency.setValueAtTime(frequency, startTime);
+        oscillator.frequency.exponentialRampToValueAtTime(Math.max(1, endFrequency), startTime + duration);
+
+        gain.gain.setValueAtTime(0.0001, startTime);
+        gain.gain.exponentialRampToValueAtTime(volume, startTime + 0.015);
+        gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+
+        oscillator.connect(gain);
+        gain.connect(ctxAudio.destination);
+        oscillator.start(startTime);
+        oscillator.stop(startTime + duration + 0.02);
+    }
+
+    function startBgm() {
+        if (!audioCtx || isMuted || bgmTimer) return;
+        bgmStep = bgmStep % BGM_MELODY.length;
+        bgmTimer = setInterval(playBgmStep, BGM_STEP_MS);
+        playBgmStep();
+    }
+
+    function stopBgm() {
+        if (!bgmTimer) return;
+        clearInterval(bgmTimer);
+        bgmTimer = null;
+    }
+
+    function playBgmStep() {
+        if (!audioCtx || isMuted) {
+            stopBgm();
+            return;
+        }
+
+        const melody = BGM_MELODY[bgmStep % BGM_MELODY.length];
+        const bass = BGM_BASS[bgmStep % BGM_BASS.length];
+        const beat = bgmStep % 8;
+
+        if (bass && bgmStep % 4 === 0) {
+            playTone(bass, 0, 0.16, { endFrequency: bass * 0.96, type: 'triangle', volume: 0.035 });
+        }
+
+        if (melody) {
+            playTone(melody, 0, 0.105, { endFrequency: melody * 1.01, type: 'square', volume: 0.032 });
+        }
+
+        if (beat === 0 || beat === 4) {
+            playTone(92, 0, 0.055, { endFrequency: 58, type: 'sine', volume: 0.035 });
+        } else if (beat === 2 || beat === 6) {
+            playTone(1760, 0, 0.025, { endFrequency: 1180, type: 'square', volume: 0.015 });
+        }
+
+        bgmStep++;
+    }
+
+    function setMuted(nextMuted) {
+        isMuted = nextMuted;
+        localStorage.setItem('jn46_muted', isMuted ? '1' : '0');
+
+        if (isMuted) {
+            stopBgm();
+        } else {
+            ensureAudio();
+            playTone(880, 0, 0.07, { endFrequency: 1175, type: 'triangle', volume: 0.09 });
+        }
+    }
+
+    function toggleMute() {
+        setMuted(!isMuted);
+    }
+
+    function playJumpSound() {
+        playTone(360, 0, 0.11, { endFrequency: 760, type: 'square', volume: 0.12 });
+        playTone(720, 0.035, 0.08, { endFrequency: 980, type: 'triangle', volume: 0.07 });
+    }
+
+    function playCheckpointSound() {
+        playTone(523.25, 0, 0.11, { endFrequency: 659.25, type: 'triangle', volume: 0.13 });
+        playTone(659.25, 0.08, 0.11, { endFrequency: 783.99, type: 'triangle', volume: 0.13 });
+        playTone(1046.5, 0.18, 0.18, { endFrequency: 1318.51, type: 'square', volume: 0.11 });
+    }
+
+    function playMissSound() {
+        playTone(220, 0, 0.18, { endFrequency: 80, type: 'sawtooth', volume: 0.13 });
+        playTone(120, 0.08, 0.22, { endFrequency: 55, type: 'triangle', volume: 0.10 });
+    }
+
+    // --- ランキングAPI連携 ---
+    const isRankingApiConfigured = () => SHEET_API_URL && SHEET_API_URL.indexOf('script.google.com') !== -1;
+
+    const cleanName = (name) => {
+        const cleaned = String(name || '').replace(/[<>&"']/g, '').trim().slice(0, 10);
+        return cleaned || 'NO NAME';
+    };
+
+    const normalizeRanking = (rows) => {
+        if (!Array.isArray(rows)) return [];
+        return rows.slice(0, RANKING_LIMIT).map((row, index) => ({
+            rank: Number(row.rank || index + 1),
+            name: cleanName(row.name),
+            floor: Number(row.floor || 0),
+            title: String(row.title || '')
+        }));
+    };
+
+    function buildApiQuery(params) {
+        const pairs = [];
+        for (const key in params) {
+            if (Object.prototype.hasOwnProperty.call(params, key)) {
+                pairs.push(`${encodeURIComponent(key)}=${encodeURIComponent(params[key])}`);
+            }
+        }
+        return pairs.join('&');
+    }
+
+    function requestRankingApi(params, onSuccess, onError) {
+        if (!isRankingApiConfigured()) {
+            onError('SHEET_API_URLが未設定です');
+            return;
+        }
+
+        const callbackName = `jn46Callback_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+        const script = document.createElement('script');
+        const query = buildApiQuery({
+            ...params,
+            callback: callbackName,
+            t: Date.now().toString()
+        });
+
+        let finished = false;
+        const cleanup = () => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timeoutId);
+            delete window[callbackName];
+            if (script.parentNode) script.parentNode.removeChild(script);
+        };
+
+        const timeoutId = setTimeout(() => {
+            cleanup();
+            onError('通信がタイムアウトしました。もう一度お試しください');
+        }, 30000);
+
+        window[callbackName] = (payload) => {
+            cleanup();
+            if (!payload || payload.ok === false) {
+                onError(payload && payload.error ? payload.error : 'ランキングAPIでエラーが発生しました');
+                return;
+            }
+            onSuccess(payload);
+        };
+
+        script.onerror = () => {
+            cleanup();
+            console.warn('Ranking API script load failed:', script.src);
+            onError('ランキングAPIに接続できませんでした');
+        };
+
+        const separator = SHEET_API_URL.indexOf('?') === -1 ? '?' : '&';
+        script.async = true;
+        script.referrerPolicy = 'no-referrer';
+        script.src = `${SHEET_API_URL}${separator}${query}`;
+        document.head.appendChild(script);
+    }
+
+    function loadRanking(force = false) {
+        if (!isRankingApiConfigured()) {
+            rankingData = [];
+            rankingStatus = 'GAS URL未設定';
+            return;
+        }
+
+        if (rankingLoading) return;
+        if (!force && rankingData.length > 0 && Date.now() - rankingLastLoadedAt < 30000) return;
+
+        rankingLoading = true;
+        rankingStatus = '読み込み中...';
+        requestRankingApi(
+            { action: 'ranking', limit: RANKING_LIMIT.toString() },
+            (payload) => {
+                rankingData = normalizeRanking(payload.ranking);
+                rankingLastLoadedAt = Date.now();
+                rankingStatus = rankingData.length > 0 ? '接続OK・最新ランキング' : '接続OK・登録0件';
+                rankingLoading = false;
+            },
+            (error) => {
+                rankingStatus = error;
+                rankingLoading = false;
+            }
+        );
+    }
+
+    function submitRankingScore(name) {
+        if (!isRankingApiConfigured()) {
+            submitStatus = 'GAS URLを設定してください';
+            return;
+        }
+        if (isSubmittingScore) return;
+
+        isSubmittingScore = true;
+        submitStatus = '送信中... 10秒ほどかかることがあります';
+        requestRankingApi(
+            {
+                action: 'submit',
+                name: cleanName(name),
+                floor: maxFloor.toString(),
+                title: getTitle(maxFloor),
+                type: resultType,
+                missCount: missCount.toString(),
+                jumpCount: jumpCount.toString()
+            },
+            (payload) => {
+                rankingData = normalizeRanking(payload.ranking);
+                rankingLastLoadedAt = Date.now();
+                rankingStatus = rankingData.length > 0 ? '接続OK・最新ランキング' : '接続OK・登録0件';
+                submitStatus = payload.rank ? `${payload.rank}位で登録しました` : 'ランキングに登録しました';
+                scoreSubmitted = true;
+                submittedScoreKey = getCurrentScoreKey();
+                isSubmittingScore = false;
+            },
+            (error) => {
+                submitStatus = `登録失敗: ${error}`;
+                isSubmittingScore = false;
+            }
+        );
+    }
+
+    function askAndSubmitScore() {
+        if (isSubmittingScore) {
+            submitStatus = '送信中... そのままお待ちください';
+            return;
+        }
+
+        if (scoreSubmitted && submittedScoreKey === getCurrentScoreKey()) {
+            submitStatus = 'この結果は登録済みです';
+            return;
+        }
+
+        if (!isRankingApiConfigured()) {
+            submitStatus = 'GAS URLを設定してください';
+            alert('HTML内のSHEET_API_URLに、Google Apps ScriptのウェブアプリURLを設定してください。');
+            return;
+        }
+
+        const input = prompt('ランキング名を入力してください（10文字まで）', playerName || 'PLAYER');
+        if (input === null) {
+            submitStatus = '登録をキャンセルしました';
+            return;
+        }
+
+        playerName = cleanName(input);
+        localStorage.setItem('jn46_player_name', playerName);
+        submitRankingScore(playerName);
+    }
+
+    function getCurrentScoreKey() {
+        return `${resultTime}:${maxFloor}:${missCount}:${jumpCount}`;
+    }
+
+    function openRanking() {
+        state = 'RANKING';
+        loadRanking(true);
+    }
+
+    function finishGame() {
+        state = 'RESULT';
+        resultTime = Date.now();
+        resultType = determinePlayerType();
+        scoreSubmitted = false;
+        submittedScoreKey = '';
+        isSubmittingScore = false;
+        submitStatus = isRankingApiConfigured() ? 'ランキングに登録できます' : 'GAS URLを設定すると登録できます';
+        if (maxFloor > bestFloor) {
+            bestFloor = maxFloor;
+            localStorage.setItem('sn46_best', String(bestFloor));
+        }
+    }
+
+    // --- 称号判定 ---
+    const getTitle = (floor) => {
+        if (floor <= 9) return "まだ本気出してない人";
+        if (floor <= 19) return "すぐ『もう一回』って言う人";
+        if (floor <= 29) return "完全にムキになっている人";
+        if (floor <= 39) return "プレイ中、息が止まっている人";
+        if (floor <= 45) return "惜しすぎて夜眠れない人";
+        return "もはや天才な人"; 
+    };
+
+    // --- タイプ判定 ---
+    const determinePlayerType = () => {
+        if (maxFloor === 0) return "まずは慣れるタイプ";
+
+        if (missCount === 0) {
+            return "慎重に物事を進める完璧主義タイプ";
+        }
+        
+        if (missCount >= (maxFloor / 2) || missCount >= 10) {
+            return "失敗を恐れないチャレンジャータイプ";
+        }
+
+        if (jumpCount >= maxFloor * 3) {
+            return "とにかく動いてみる直感タイプ";
+        }
+
+        if (jumpCount <= maxFloor * 1.5) {
+            return "無駄を嫌うスマートタイプ";
+        }
+
+        return "自分のペースを崩さない安定タイプ";
+    };
+
+    // --- 足場生成 ---
+    function generatePlatform(floorNum, y, previousPlatform = null) {
+        let width = 120;
+        let speed = 0;
+        let type = 1; 
+        let moveMode = 'linear';
+        const previousWasBreakable = previousPlatform && previousPlatform.type === 2;
+
+        if (floorNum === 0) {
+            width = 120;
+            speed = 0;
+            type = 0;
+        } else if (floorNum <= 10) {
+            width = 90 + Math.random() * 30;
+            speed = 1.5 + Math.random() * 1.5;
+        } else if (floorNum <= 20) {
+            width = 70 + Math.random() * 30;
+            speed = 3.0 + Math.random() * 2.0;
+        } else if (floorNum <= 30) {
+            width = 50 + Math.random() * 20;
+            speed = 4.5 + Math.random() * 2.5;
+            if (Math.random() < 0.3) moveMode = 'sine';
+        } else {
+            width = 35 + Math.random() * 25;
+            speed = 6.0 + Math.random() * 4.0;
+            if (Math.random() < 0.5) moveMode = 'sine';
+            if (!previousWasBreakable && Math.random() < 0.25) type = 2;
+        }
+
+        speed *= (Math.random() > 0.5 ? 1 : -1);
+
+        let x = Math.random() * (WIDTH - width);
+        return {
+            floor: floorNum,
+            x: x, y: y, width: width, height: 12,
+            type: type, speed: speed, moveMode: moveMode,
+            timeOffset: Math.random() * 100,
+            state: 'idle',
+            stepTimer: 0,
+            stepStartedAt: 0,
+            vanishedAt: 0
+        };
+    }
+
+    // --- ゲームの初期化 ---
+    function initGame() {
+        platforms = [];
+        maxFloor = 0;
+        time = TIME_LIMIT;
+        cameraY = 0;
+        showMissText = 0;
+        bonusTextTimer = 0;
+        missCount = 0;
+        jumpCount = 0;
+        
+        let startPlatform = generatePlatform(0, HEIGHT - 80);
+        startPlatform.x = WIDTH / 2 - startPlatform.width / 2;
+        platforms.push(startPlatform);
+        lastSafeFloor = startPlatform;
+        
+        player.width = 20;
+        player.height = 20;
+        player.currentPlatform = startPlatform;
+        player.offsetX = startPlatform.width / 2 - player.width / 2;
+        player.x = startPlatform.x + player.offsetX;
+        player.y = startPlatform.y - player.height;
+        player.vy = 0;
+        player.isGrounded = true;
+        
+        let currentY = startPlatform.y;
+        for(let i = 1; i <= 15; i++) {
+            currentY -= 110;
+            platforms.push(generatePlatform(i, currentY, platforms[platforms.length - 1]));
+        }
+    }
+
+    // --- 入力制御 ---
+    function handleJump() {
+        ensureAudio();
+
+        if (state === 'TITLE') {
+            initGame();
+            state = 'READY';
+        } else if (state === 'READY') {
+            state = 'PLAY';
+            startTime = Date.now();
+            player.vy = JUMP_FORCE;
+            player.isGrounded = false;
+            player.currentPlatform = null;
+            jumpCount++;
+            playJumpSound();
+        } else if (state === 'PLAY') {
+            if (player.isGrounded) {
+                player.vy = JUMP_FORCE;
+                player.isGrounded = false;
+                player.currentPlatform = null;
+                jumpCount++;
+                playJumpSound();
+            }
+        } else if (state === 'RESULT') {
+            if (Date.now() - resultTime > 1000) {
+                state = 'TITLE';
+            }
+        } else if (state === 'RANKING') {
+            state = 'TITLE';
+        }
+    }
+
+    function getCanvasPoint(event) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+            x: (event.clientX - rect.left) * (WIDTH / rect.width),
+            y: (event.clientY - rect.top) * (HEIGHT / rect.height)
+        };
+    }
+
+    function isHit(id, point) {
+        const area = hitAreas[id];
+        if (!area) return false;
+        return point.x >= area.x && point.x <= area.x + area.width && point.y >= area.y && point.y <= area.y + area.height;
+    }
+
+    function handleCanvasPress(event) {
+        event.preventDefault();
+        const point = getCanvasPoint(event);
+
+        if (state === 'TITLE') {
+            if (isHit('titleMute', point)) {
+                toggleMute();
+                return;
+            }
+            ensureAudio();
+            if (isHit('titleRanking', point)) {
+                openRanking();
+                return;
+            }
+            handleJump();
+            return;
+        }
+
+        ensureAudio();
+
+        if (state === 'RANKING') {
+            if (isHit('rankingRefresh', point)) {
+                loadRanking(true);
+                return;
+            }
+            if (isHit('rankingBack', point)) {
+                state = 'TITLE';
+                return;
+            }
+            return;
+        }
+
+        if (state === 'RESULT') {
+            if (Date.now() - resultTime <= 1000) return;
+            if (isHit('resultSubmit', point)) {
+                askAndSubmitScore();
+                return;
+            }
+            if (isHit('resultRanking', point)) {
+                openRanking();
+                return;
+            }
+            if (isHit('resultRestart', point)) {
+                state = 'TITLE';
+                return;
+            }
+            return;
+        }
+
+        handleJump();
+    }
+
+    window.addEventListener('keydown', (e) => {
+        if (e.code === 'Space') {
+            e.preventDefault();
+            ensureAudio();
+            handleJump();
+        } else if (state === 'TITLE' && e.key.toLowerCase() === 'm') {
+            toggleMute();
+        } else if (state === 'TITLE' && e.key.toLowerCase() === 'r') {
+            ensureAudio();
+            openRanking();
+        } else if (state === 'RANKING' && e.key === 'Escape') {
+            state = 'TITLE';
+        }
+    });
+    canvas.addEventListener('pointerdown', handleCanvasPress);
+
+    // --- メインループ ---
+    function update() {
+        if (state === 'PLAY') {
+            const now = Date.now();
+            let elapsed = (now - startTime) / 1000;
+            time = Math.max(0, TIME_LIMIT - elapsed);
+            
+            if (time <= 0) {
+                finishGame();
+                return;
+            }
+
+            for (let p of platforms) {
+                if (p.moveMode === 'linear' && p.speed !== 0) {
+                    p.x += p.speed;
+                    if (p.x <= 0) {
+                        p.x = 0;
+                        p.speed *= -1;
+                    } else if (p.x + p.width >= WIDTH) {
+                        p.x = WIDTH - p.width;
+                        p.speed *= -1;
+                    }
+                } else if (p.moveMode === 'sine') {
+                    p.timeOffset += 0.05 * (Math.abs(p.speed) / 4);
+                    let centerX = (WIDTH - p.width) / 2;
+                    let amplitude = centerX;
+                    p.x = centerX + Math.sin(p.timeOffset) * amplitude;
+                }
+
+                if (p.type === 2 && p.state === 'stepped') {
+                    if (!p.stepStartedAt) p.stepStartedAt = now;
+                    p.stepTimer = now - p.stepStartedAt;
+                    if (p.stepTimer >= BREAKABLE_VANISH_DELAY) {
+                        p.state = 'vanished';
+                        p.vanishedAt = now;
+                        p.stepTimer = 0;
+                        p.stepStartedAt = 0;
+                    }
+                } else if (p.type === 2 && p.state === 'vanished') {
+                    if (now - p.vanishedAt >= BREAKABLE_RESPAWN_DELAY) {
+                        p.state = 'idle';
+                        p.stepTimer = 0;
+                        p.stepStartedAt = 0;
+                        p.vanishedAt = 0;
+                    }
+                }
+            }
+
+            player.oldY = player.y;
+            player.vy += GRAVITY;
+            player.y += player.vy;
+
+            if (!player.isGrounded && player.vy > 0) {
+                let currentBottom = player.y + player.height;
+                let prevBottom = player.oldY + player.height;
+
+                for (let p of platforms) {
+                    if (p.state === 'vanished') continue;
+
+                    let top = p.y;
+                    if (player.x + player.width > p.x && player.x < p.x + p.width) {
+                        if (prevBottom <= top && currentBottom >= top) {
+                            player.y = top - player.height;
+                            player.vy = 0;
+                            player.isGrounded = true;
+                            player.currentPlatform = p;
+                            player.offsetX = player.x - p.x;
+                            
+                            if (p.floor > maxFloor) {
+                                maxFloor = p.floor;
+                                if (maxFloor % 10 === 0 && maxFloor !== 0) {
+                                    startTime += BONUS_TIME * 1000;
+                                    bonusTextTimer = 60; 
+                                    playCheckpointSound();
+                                }
+                            }
+                            
+                            if (p.type === 0 || p.type === 1) {
+                                lastSafeFloor = p;
+                            }
+
+                            if (p.type === 2 && p.state === 'idle') {
+                                p.state = 'stepped';
+                                p.stepStartedAt = now;
+                                p.vanishedAt = 0;
+                                p.stepTimer = 0;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (player.isGrounded && player.currentPlatform) {
+                if (player.currentPlatform.state === 'vanished') {
+                    player.isGrounded = false;
+                    player.currentPlatform = null;
+                } else {
+                    player.x = player.currentPlatform.x + player.offsetX;
+                    player.y = player.currentPlatform.y - player.height;
+                    player.vy = 0;
+                }
+            }
+
+            let targetCameraY = player.y - HEIGHT * 0.55;
+            if (targetCameraY < cameraY) {
+                cameraY += (targetCameraY - cameraY) * 0.15;
+            }
+
+            let highestFloor = platforms[platforms.length - 1];
+            while (highestFloor.y > cameraY - 200) {
+                let nextY = highestFloor.y - 110;
+                let p = generatePlatform(highestFloor.floor + 1, nextY, highestFloor);
+                platforms.push(p);
+                highestFloor = p;
+            }
+            platforms = platforms.filter(p => p.y < cameraY + HEIGHT + 200);
+
+            if (player.y > cameraY + HEIGHT) {
+                showMissText = 30;
+                missCount++;
+                playMissSound();
+
+                if (lastSafeFloor) {
+                    player.currentPlatform = lastSafeFloor;
+                    player.isGrounded = true;
+                    player.offsetX = lastSafeFloor.width / 2 - player.width / 2;
+                    player.x = lastSafeFloor.x + player.offsetX;
+                    player.y = lastSafeFloor.y - player.height;
+                    player.vy = 0;
+                    lastSafeFloor.state = 'idle';
+                    lastSafeFloor.stepTimer = 0;
+                    lastSafeFloor.stepStartedAt = 0;
+                    lastSafeFloor.vanishedAt = 0;
+                    cameraY = lastSafeFloor.y - HEIGHT / 2;
+                }
+            }
+            if (showMissText > 0) showMissText--;
+            if (bonusTextTimer > 0) bonusTextTimer--;
+        }
+    }
+
+    // --- UI描画ヘルパー ---
+    function resetHitAreas() {
+        hitAreas = {};
+    }
+
+    function drawFitText(text, x, y, maxWidth, align = 'left') {
+        const oldAlign = ctx.textAlign;
+        ctx.textAlign = align;
+        let output = String(text || '');
+        while (ctx.measureText(output).width > maxWidth && output.length > 3) {
+            output = `${output.slice(0, -4)}...`;
+        }
+        ctx.fillText(output, x, y);
+        ctx.textAlign = oldAlign;
+    }
+
+    function drawButton(id, label, x, y, width, height, options = {}) {
+        hitAreas[id] = { x, y, width, height };
+        const fill = options.fill || TEXT_COLOR;
+        const stroke = options.stroke || fill;
+        const text = options.text || '#f8f9fa';
+
+        ctx.fillStyle = fill;
+        ctx.fillRect(x, y, width, height);
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x, y, width, height);
+        ctx.fillStyle = text;
+        ctx.font = options.font || '900 18px "Montserrat", "Noto Sans JP", sans-serif';
+        drawFitText(label, x + width / 2, y + height / 2 + 7, width - 18, 'center');
+    }
+
+    function drawRankingScreen() {
+        ctx.fillStyle = '#212529';
+        ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+        ctx.strokeStyle = '#343a40';
+        ctx.lineWidth = 2;
+        let offsetY = (Date.now() / 20) % 50;
+        for(let i = -50; i < HEIGHT; i += 50) {
+            ctx.beginPath(); ctx.moveTo(0, i + offsetY); ctx.lineTo(WIDTH, i + offsetY); ctx.stroke();
+        }
+
+        ctx.fillStyle = '#f8f9fa';
+        ctx.fillRect(25, 55, 350, 540);
+
+        ctx.textAlign = 'center';
+        ctx.fillStyle = TEXT_COLOR;
+        ctx.font = '900 30px "Montserrat", sans-serif';
+        ctx.fillText('RANKING', WIDTH / 2, 105);
+        ctx.font = '900 16px "Montserrat", sans-serif';
+        ctx.fillStyle = ACCENT_COLOR;
+        ctx.fillText('TOP 10', WIDTH / 2, 130);
+
+        ctx.fillStyle = '#6c757d';
+        ctx.font = '700 12px "Noto Sans JP", sans-serif';
+        ctx.fillText(rankingStatus, WIDTH / 2, 155);
+
+        ctx.textAlign = 'left';
+        ctx.font = '900 12px "Montserrat", sans-serif';
+        ctx.fillStyle = '#adb5bd';
+        ctx.fillText('RANK', 48, 184);
+        ctx.fillText('NAME', 105, 184);
+        ctx.textAlign = 'right';
+        ctx.fillText('FLOOR', 344, 184);
+
+        if (rankingData.length === 0) {
+            ctx.textAlign = 'center';
+            ctx.fillStyle = TEXT_COLOR;
+            ctx.font = '700 16px "Noto Sans JP", sans-serif';
+            const message = rankingLoading ? '読み込み中...' : 'ランキングはまだありません';
+            ctx.fillText(message, WIDTH / 2, 300);
+        } else {
+            for (let i = 0; i < rankingData.length; i++) {
+                const row = rankingData[i];
+                const y = 216 + i * 32;
+                ctx.fillStyle = i < 3 ? ACCENT_COLOR : TEXT_COLOR;
+                ctx.font = '900 18px "Montserrat", sans-serif';
+                ctx.textAlign = 'left';
+                ctx.fillText(`${row.rank}`, 55, y);
+
+                ctx.font = '900 15px "Montserrat", "Noto Sans JP", sans-serif';
+                drawFitText(row.name, 105, y, 165, 'left');
+
+                ctx.textAlign = 'right';
+                ctx.font = '900 18px "Montserrat", sans-serif';
+                ctx.fillText(`${row.floor}F`, 344, y);
+            }
+        }
+
+        drawButton('rankingRefresh', 'UPDATE', 55, 535, 130, 38, { fill: ACCENT_COLOR });
+        drawButton('rankingBack', 'BACK', 215, 535, 130, 38, { fill: TEXT_COLOR });
+    }
+
+    // --- 描画処理 ---
+    function draw() {
+        resetHitAreas();
+
+        if (state === 'RANKING') {
+            drawRankingScreen();
+            return;
+        }
+
+        if (state === 'TITLE') {
+            // タイトル画面の専用描画
+            ctx.fillStyle = '#212529';
+            ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+            ctx.strokeStyle = '#343a40';
+            ctx.lineWidth = 2;
+            let offsetY = (Date.now() / 20) % 50;
+            for(let i = -50; i < HEIGHT; i += 50) {
+                ctx.beginPath(); ctx.moveTo(0, i + offsetY); ctx.lineTo(WIDTH, i + offsetY); ctx.stroke();
+            }
+
+            ctx.textAlign = 'center';
+            ctx.font = '900 46px "Montserrat", sans-serif';
+            ctx.fillStyle = '#f8f9fa';
+            ctx.fillText(`JUMP`, WIDTH / 2, 165);
+            ctx.fillStyle = ACCENT_COLOR;
+            ctx.fillText(`NARUNARU`, WIDTH / 2, 218);
+            
+            ctx.fillStyle = '#adb5bd';
+            ctx.font = '700 16px "Noto Sans JP", sans-serif';
+            ctx.fillText(`46秒でどこまで登れるか`, WIDTH / 2, 280);
+            
+            ctx.fillStyle = '#f8f9fa';
+            ctx.font = '700 14px "Noto Sans JP", sans-serif';
+            ctx.fillText(`タップ / スペースキーでジャンプ`, WIDTH / 2, 332);
+            
+            ctx.fillStyle = ACCENT_COLOR;
+            ctx.font = '700 12px "Noto Sans JP", sans-serif';
+            ctx.fillText(`※ 10階到達ごとに +30秒ボーナス`, WIDTH / 2, 362);
+
+            if (Math.floor(Date.now() / 500) % 2 === 0) {
+                drawButton('titleStart', 'TAP TO START', 95, 430, 210, 44, { fill: ACCENT_COLOR });
+            } else {
+                hitAreas.titleStart = { x: 95, y: 430, width: 210, height: 44 };
+            }
+            drawButton('titleRanking', 'RANKING TOP 10', 95, 492, 210, 42, { fill: '#f8f9fa', text: TEXT_COLOR, stroke: '#f8f9fa', font: '900 16px "Montserrat", sans-serif' });
+            drawButton('titleMute', isMuted ? 'SOUND: OFF' : 'SOUND: ON', 115, 552, 170, 36, {
+                fill: isMuted ? '#495057' : TEXT_COLOR,
+                stroke: '#adb5bd',
+                text: '#f8f9fa',
+                font: '900 14px "Montserrat", sans-serif'
+            });
+            return;
+        }
+
+        ctx.fillStyle = '#f8f9fa';
+        ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+        ctx.strokeStyle = '#e9ecef';
+        ctx.lineWidth = 2;
+        let offsetY = -cameraY % 50;
+        for(let i = -50; i < HEIGHT; i += 50) {
+            ctx.beginPath(); ctx.moveTo(0, i + offsetY); ctx.lineTo(WIDTH, i + offsetY); ctx.stroke();
+        }
+        for(let i = 0; i < WIDTH; i += 50) {
+            ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, HEIGHT); ctx.stroke();
+        }
+
+        ctx.save();
+        ctx.translate(0, -cameraY);
+
+        for (let p of platforms) {
+            if (p.state === 'vanished') continue;
+
+            if (p.type === 0 || p.type === 1) {
+                ctx.fillStyle = TEXT_COLOR;
+                ctx.fillRect(p.x, p.y, p.width, p.height);
+            } else if (p.type === 2) {
+                const timeLeft = BREAKABLE_VANISH_DELAY - p.stepTimer;
+                const isWarningBlink = p.state === 'stepped'
+                    && timeLeft <= 1000
+                    && Math.floor(Date.now() / 100) % 2 === 0;
+
+                if (isWarningBlink) {
+                    ctx.fillStyle = '#f8f9fa';
+                } else {
+                    ctx.fillStyle = ACCENT_COLOR;
+                }
+                ctx.fillRect(p.x, p.y, p.width, p.height);
+            }
+            
+            if (p.floor > 0 && p.floor % 10 === 0) {
+                ctx.fillStyle = ACCENT_COLOR;
+                ctx.font = '900 12px "Montserrat", sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(`CHECKPOINT`, p.x + p.width/2, p.y - 10);
+            }
+        }
+
+        drawPlayer();
+
+        if (bonusTextTimer > 0) {
+            ctx.fillStyle = ACCENT_COLOR;
+            ctx.textAlign = 'center';
+            ctx.font = '900 28px "Montserrat", sans-serif';
+            let floatY = player.y - 40 - (60 - bonusTextTimer);
+            ctx.fillText(`+30 SEC!`, player.x + player.width/2, floatY);
+        }
+
+        ctx.restore();
+
+        if (state === 'PLAY' || state === 'READY') {
+            if (bonusTextTimer > 0 && bonusTextTimer % 10 > 5) {
+                ctx.fillStyle = ACCENT_COLOR;
+            } else {
+                ctx.fillStyle = time <= 10 ? ACCENT_COLOR : TEXT_COLOR;
+            }
+            ctx.font = '900 24px "Montserrat", sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText(`TIME: ${time.toFixed(2)}`, 15, 35);
+            
+            ctx.fillStyle = TEXT_COLOR;
+            ctx.fillText(`FLOOR: ${maxFloor}F`, 15, 65);
+            
+            if (bestFloor > 0) {
+                ctx.textAlign = 'right';
+                ctx.font = '700 16px "Montserrat", sans-serif';
+                ctx.fillText(`BEST: ${bestFloor}F`, WIDTH - 15, 35);
+            }
+
+            if (showMissText > 0) {
+                ctx.fillStyle = ACCENT_COLOR;
+                ctx.textAlign = 'center';
+                ctx.font = '900 40px "Montserrat", sans-serif';
+                ctx.fillText("MISS!", WIDTH / 2, HEIGHT / 2);
+            }
+        }
+
+        if (state === 'READY') {
+            ctx.textAlign = 'center';
+            if (Math.floor(Date.now() / 500) % 2 === 0) {
+                ctx.fillStyle = ACCENT_COLOR;
+                ctx.font = '900 24px "Montserrat", sans-serif';
+                ctx.fillText(`TAP TO JUMP!`, WIDTH / 2, HEIGHT / 2);
+            }
+        }
+
+        if (state === 'RESULT') {
+            ctx.fillStyle = 'rgba(33, 37, 41, 0.85)';
+            ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+            ctx.fillStyle = '#f8f9fa';
+            ctx.fillRect(WIDTH/2 - 170, 70, 340, 510);
+
+            ctx.textAlign = 'center';
+            ctx.fillStyle = TEXT_COLOR;
+            ctx.font = '900 32px "Montserrat", sans-serif';
+            ctx.fillText(`RESULT`, WIDTH / 2, 122);
+
+            ctx.font = '700 24px "Noto Sans JP", sans-serif';
+            ctx.fillText(`到達階数: ${maxFloor}F`, WIDTH / 2, 176);
+
+            ctx.font = '700 16px "Noto Sans JP", sans-serif';
+            ctx.fillText(`称号:`, WIDTH / 2, 226);
+            ctx.fillStyle = ACCENT_COLOR;
+            
+            ctx.font = '900 19px "Noto Sans JP", sans-serif';
+            drawFitText(getTitle(maxFloor), WIDTH / 2, 256, 300, 'center');
+
+            ctx.fillStyle = TEXT_COLOR;
+            ctx.font = '700 16px "Noto Sans JP", sans-serif';
+            ctx.fillText(`タイプ:`, WIDTH / 2, 305);
+            
+            ctx.font = '900 18px "Noto Sans JP", sans-serif';
+            drawFitText(resultType, WIDTH / 2, 334, 300, 'center');
+
+            if (Date.now() - resultTime > 1000) {
+                ctx.fillStyle = submitStatus.indexOf('失敗') !== -1 || submitStatus.indexOf('未設定') !== -1 ? ACCENT_COLOR : '#495057';
+                ctx.font = '700 12px "Noto Sans JP", sans-serif';
+                drawFitText(submitStatus, WIDTH / 2, 370, 300, 'center');
+
+                const submitLabel = isSubmittingScore
+                    ? 'SENDING...'
+                    : (scoreSubmitted && submittedScoreKey === getCurrentScoreKey() ? 'REGISTERED' : 'REGISTER SCORE');
+                drawButton('resultSubmit', submitLabel, 80, 394, 240, 38, {
+                    fill: isSubmittingScore ? '#adb5bd' : (isRankingApiConfigured() ? ACCENT_COLOR : '#adb5bd'),
+                    text: '#f8f9fa'
+                });
+                drawButton('resultRanking', 'RANKING TOP 10', 80, 444, 240, 38, { fill: TEXT_COLOR });
+                drawButton('resultRestart', 'RESTART', 80, 494, 240, 38, { fill: '#f8f9fa', text: TEXT_COLOR, stroke: TEXT_COLOR });
+            }
+
+            ctx.fillStyle = '#adb5bd';
+            ctx.font = '700 12px "Noto Sans JP", sans-serif';
+            ctx.fillText(`※このゲームはAIを活用して制作されています`, WIDTH / 2, HEIGHT - 20);
+        }
+    }
+
+    function loop() {
+        update();
+        draw();
+        requestAnimationFrame(loop);
+    }
+
+    initGame();
+    loop();
+
+</script>
+</body>
+</html>
