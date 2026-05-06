@@ -92,6 +92,8 @@
     let isSubmittingScore = false;
     let submittedScoreKey = '';
     let hitAreas = {};
+    let gameCleared = false;
+    const GOAL_FLOOR = 46;
 
     let player = {
         x: WIDTH / 2 - 10,
@@ -549,8 +551,9 @@
         loadRanking(true);
     }
 
-    function finishGame() {
+    function finishGame(cleared = false) {
         state = 'RESULT';
+        gameCleared = cleared;
         resultTime = Date.now();
         resultType = determinePlayerType();
         scoreSubmitted = false;
@@ -598,9 +601,28 @@
 
     // --- 足場生成 ---
     function generatePlatform(floorNum, y, previousPlatform = null) {
+        if (floorNum === GOAL_FLOOR) {
+            const goalWidth = 220;
+            return {
+                floor: floorNum,
+                x: (WIDTH - goalWidth) / 2,
+                y: y,
+                width: goalWidth,
+                height: 16,
+                type: 3,
+                speed: 0,
+                moveMode: 'linear',
+                timeOffset: 0,
+                state: 'idle',
+                stepTimer: 0,
+                stepStartedAt: 0,
+                vanishedAt: 0
+            };
+        }
+
         let width = 120;
         let speed = 0;
-        let type = 1; 
+        let type = 1;
         let moveMode = 'linear';
         const previousWasBreakable = previousPlatform && previousPlatform.type === 2;
 
@@ -650,7 +672,8 @@
         bonusTextTimer = 0;
         missCount = 0;
         jumpCount = 0;
-        
+        gameCleared = false;
+
         let startPlatform = generatePlatform(0, HEIGHT - 80);
         startPlatform.x = WIDTH / 2 - startPlatform.width / 2;
         platforms.push(startPlatform);
@@ -856,14 +879,19 @@
                             
                             if (p.floor > maxFloor) {
                                 maxFloor = p.floor;
+                                if (maxFloor === GOAL_FLOOR) {
+                                    playCheckpointSound();
+                                    finishGame(true);
+                                    return;
+                                }
                                 if (maxFloor % 10 === 0 && maxFloor !== 0) {
                                     startTime += BONUS_TIME * 1000;
-                                    bonusTextTimer = 60; 
+                                    bonusTextTimer = 60;
                                     playCheckpointSound();
                                 }
                             }
-                            
-                            if (p.type === 0 || p.type === 1) {
+
+                            if (p.type === 0 || p.type === 1 || p.type === 3) {
                                 lastSafeFloor = p;
                             }
 
@@ -896,7 +924,7 @@
             }
 
             let highestFloor = platforms[platforms.length - 1];
-            while (highestFloor.y > cameraY - 200) {
+            while (highestFloor.y > cameraY - 200 && highestFloor.floor < GOAL_FLOOR) {
                 let nextY = highestFloor.y - 110;
                 let p = generatePlatform(highestFloor.floor + 1, nextY, highestFloor);
                 platforms.push(p);
@@ -958,6 +986,44 @@
         ctx.fillStyle = text;
         ctx.font = options.font || '900 18px "Montserrat", "Noto Sans JP", sans-serif';
         drawFitText(label, x + width / 2, y + height / 2 + 7, width - 18, 'center');
+    }
+
+    function drawGoalPlatform(p) {
+        const checkSize = 8;
+        for (let dy = 0; dy < p.height; dy += checkSize) {
+            for (let dx = 0; dx < p.width; dx += checkSize) {
+                const cellW = Math.min(checkSize, p.width - dx);
+                const cellH = Math.min(checkSize, p.height - dy);
+                const isAlt = ((Math.floor(dx / checkSize) + Math.floor(dy / checkSize)) % 2) === 0;
+                ctx.fillStyle = isAlt ? '#212529' : '#f8f9fa';
+                ctx.fillRect(p.x + dx, p.y + dy, cellW, cellH);
+            }
+        }
+        ctx.strokeStyle = ACCENT_COLOR;
+        ctx.lineWidth = 3;
+        ctx.strokeRect(p.x, p.y, p.width, p.height);
+
+        const bannerW = 110;
+        const bannerH = 28;
+        const bannerX = p.x + p.width / 2 - bannerW / 2;
+        const bannerY = p.y - bannerH - 10;
+        const pulse = 1 + Math.sin(Date.now() / 180) * 0.05;
+
+        ctx.save();
+        ctx.translate(bannerX + bannerW / 2, bannerY + bannerH / 2);
+        ctx.scale(pulse, pulse);
+        ctx.fillStyle = ACCENT_COLOR;
+        ctx.fillRect(-bannerW / 2, -bannerH / 2, bannerW, bannerH);
+        ctx.strokeStyle = '#212529';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(-bannerW / 2, -bannerH / 2, bannerW, bannerH);
+        ctx.fillStyle = '#f8f9fa';
+        ctx.font = '900 18px "Montserrat", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('GOAL 46F', 0, 1);
+        ctx.restore();
+        ctx.textBaseline = 'alphabetic';
     }
 
     function drawRankingScreen() {
@@ -1111,9 +1177,11 @@
                     ctx.fillStyle = ACCENT_COLOR;
                 }
                 ctx.fillRect(p.x, p.y, p.width, p.height);
+            } else if (p.type === 3) {
+                drawGoalPlatform(p);
             }
-            
-            if (p.floor > 0 && p.floor % 10 === 0) {
+
+            if (p.type !== 3 && p.floor > 0 && p.floor % 10 === 0) {
                 ctx.fillStyle = ACCENT_COLOR;
                 ctx.font = '900 12px "Montserrat", sans-serif';
                 ctx.textAlign = 'center';
@@ -1177,12 +1245,23 @@
             ctx.fillRect(WIDTH/2 - 170, 70, 340, 510);
 
             ctx.textAlign = 'center';
-            ctx.fillStyle = TEXT_COLOR;
-            ctx.font = '900 32px "Montserrat", sans-serif';
-            ctx.fillText(`RESULT`, WIDTH / 2, 122);
+            if (gameCleared) {
+                ctx.fillStyle = ACCENT_COLOR;
+                ctx.font = '900 34px "Montserrat", sans-serif';
+                ctx.fillText(`STAGE CLEAR!`, WIDTH / 2, 122);
+            } else {
+                ctx.fillStyle = TEXT_COLOR;
+                ctx.font = '900 32px "Montserrat", sans-serif';
+                ctx.fillText(`RESULT`, WIDTH / 2, 122);
+            }
 
+            ctx.fillStyle = TEXT_COLOR;
             ctx.font = '700 24px "Noto Sans JP", sans-serif';
-            ctx.fillText(`到達階数: ${maxFloor}F`, WIDTH / 2, 176);
+            if (gameCleared) {
+                ctx.fillText(`祝・全46階制覇！`, WIDTH / 2, 176);
+            } else {
+                ctx.fillText(`到達階数: ${maxFloor}F`, WIDTH / 2, 176);
+            }
 
             ctx.font = '700 16px "Noto Sans JP", sans-serif';
             ctx.fillText(`称号:`, WIDTH / 2, 226);
