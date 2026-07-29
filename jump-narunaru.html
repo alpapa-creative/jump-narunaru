@@ -47,7 +47,11 @@
     // Google Apps Script のウェブアプリURLを設定するとランキング登録が有効になります。
     // 例: const SHEET_API_URL = 'https://script.google.com/macros/s/xxxx/exec';
     const SHEET_API_URL = 'https://script.google.com/macros/s/AKfycbxxqxvYZRQafob5lhhvf0bTEPwV7Ev-49ZDY6bfOyHehZXPyZvaYBzv2f1PhAiPMF5a/exec';
-    const RANKING_LIMIT = 10;
+    const RANKING_LIMIT = 50;
+    // ランキング一覧の表示領域（スクロール対応）
+    const RANKING_ROW_HEIGHT = 30;
+    const RANKING_LIST_TOP = 196;
+    const RANKING_LIST_BOTTOM = 520;
     const PLAYER_NORMAL_IMAGE_SRC = 'NARUNARU_transparent.png';
     const PLAYER_JUMP_IMAGE_SRC = 'NARUNARU_JUMP_transparent.png';
     const PLAYER_SPRITE_HEIGHT = 94;
@@ -87,6 +91,8 @@
     let rankingStatus = 'ランキング未読込';
     let rankingLoading = false;
     let rankingLastLoadedAt = 0;
+    let rankingScroll = 0;
+    let rankingDrag = null;
     let submitStatus = '';
     let scoreSubmitted = false;
     let isSubmittingScore = false;
@@ -506,6 +512,8 @@
                 scoreSubmitted = true;
                 submittedScoreKey = getCurrentScoreKey();
                 isSubmittingScore = false;
+                // 登録レスポンスは上位10件のみなので、50件を取り直す
+                loadRanking(true);
             },
             (error) => {
                 submitStatus = `登録失敗: ${error}`;
@@ -548,6 +556,8 @@
 
     function openRanking() {
         state = 'RANKING';
+        rankingScroll = 0;
+        rankingDrag = null;
         loadRanking(true);
     }
 
@@ -770,6 +780,9 @@
                 state = 'TITLE';
                 return;
             }
+            if (isInRankingList(point)) {
+                rankingDrag = { y: point.y, scroll: rankingScroll };
+            }
             return;
         }
 
@@ -808,6 +821,24 @@
         }
     });
     canvas.addEventListener('pointerdown', handleCanvasPress);
+
+    // ランキング一覧のスクロール（ドラッグ／ホイール）
+    canvas.addEventListener('pointermove', (event) => {
+        if (state !== 'RANKING' || !rankingDrag) return;
+        event.preventDefault();
+        rankingScroll = rankingDrag.scroll - (getCanvasPoint(event).y - rankingDrag.y);
+        clampRankingScroll();
+    });
+    const endRankingDrag = () => { rankingDrag = null; };
+    canvas.addEventListener('pointerup', endRankingDrag);
+    canvas.addEventListener('pointercancel', endRankingDrag);
+    canvas.addEventListener('pointerleave', endRankingDrag);
+    canvas.addEventListener('wheel', (event) => {
+        if (state !== 'RANKING') return;
+        event.preventDefault();
+        rankingScroll += event.deltaY;
+        clampRankingScroll();
+    }, { passive: false });
 
     // --- メインループ ---
     function update() {
@@ -1026,6 +1057,19 @@
         ctx.textBaseline = 'alphabetic';
     }
 
+    function getRankingContentHeight() {
+        return rankingData.length * RANKING_ROW_HEIGHT;
+    }
+
+    function clampRankingScroll() {
+        const max = Math.max(0, getRankingContentHeight() - (RANKING_LIST_BOTTOM - RANKING_LIST_TOP));
+        rankingScroll = Math.min(max, Math.max(0, rankingScroll));
+    }
+
+    function isInRankingList(point) {
+        return point.x >= 30 && point.x <= 370 && point.y >= RANKING_LIST_TOP && point.y <= RANKING_LIST_BOTTOM;
+    }
+
     function drawRankingScreen() {
         ctx.fillStyle = '#212529';
         ctx.fillRect(0, 0, WIDTH, HEIGHT);
@@ -1046,7 +1090,7 @@
         ctx.fillText('RANKING', WIDTH / 2, 105);
         ctx.font = '900 16px "Montserrat", sans-serif';
         ctx.fillStyle = ACCENT_COLOR;
-        ctx.fillText('TOP 10', WIDTH / 2, 130);
+        ctx.fillText(`TOP ${RANKING_LIMIT}`, WIDTH / 2, 130);
 
         ctx.fillStyle = '#6c757d';
         ctx.font = '700 12px "Noto Sans JP", sans-serif';
@@ -1067,9 +1111,18 @@
             const message = rankingLoading ? '読み込み中...' : 'ランキングはまだありません';
             ctx.fillText(message, WIDTH / 2, 300);
         } else {
+            clampRankingScroll();
+            const viewH = RANKING_LIST_BOTTOM - RANKING_LIST_TOP;
+
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(30, RANKING_LIST_TOP, 340, viewH);
+            ctx.clip();
+
             for (let i = 0; i < rankingData.length; i++) {
+                const y = RANKING_LIST_TOP + 20 + i * RANKING_ROW_HEIGHT - rankingScroll;
+                if (y < RANKING_LIST_TOP - RANKING_ROW_HEIGHT || y > RANKING_LIST_BOTTOM + RANKING_ROW_HEIGHT) continue;
                 const row = rankingData[i];
-                const y = 216 + i * 32;
                 ctx.fillStyle = i < 3 ? ACCENT_COLOR : TEXT_COLOR;
                 ctx.font = '900 18px "Montserrat", sans-serif';
                 ctx.textAlign = 'left';
@@ -1081,6 +1134,18 @@
                 ctx.textAlign = 'right';
                 ctx.font = '900 18px "Montserrat", sans-serif';
                 ctx.fillText(`${row.floor}F`, 344, y);
+            }
+            ctx.restore();
+
+            // スクロールバー
+            const contentH = getRankingContentHeight();
+            if (contentH > viewH) {
+                const barH = Math.max(30, viewH * viewH / contentH);
+                const barY = RANKING_LIST_TOP + (viewH - barH) * (rankingScroll / (contentH - viewH));
+                ctx.fillStyle = '#dee2e6';
+                ctx.fillRect(354, RANKING_LIST_TOP, 4, viewH);
+                ctx.fillStyle = '#868e96';
+                ctx.fillRect(354, barY, 4, barH);
             }
         }
 
@@ -1133,7 +1198,7 @@
             } else {
                 hitAreas.titleStart = { x: 95, y: 430, width: 210, height: 44 };
             }
-            drawButton('titleRanking', 'RANKING TOP 10', 95, 492, 210, 42, { fill: '#f8f9fa', text: TEXT_COLOR, stroke: '#f8f9fa', font: '900 16px "Montserrat", sans-serif' });
+            drawButton('titleRanking', 'RANKING', 95, 492, 210, 42, { fill: '#f8f9fa', text: TEXT_COLOR, stroke: '#f8f9fa', font: '900 16px "Montserrat", sans-serif' });
             drawButton('titleMute', isMuted ? 'SOUND: OFF' : 'SOUND: ON', 115, 552, 170, 36, {
                 fill: isMuted ? '#495057' : TEXT_COLOR,
                 stroke: '#adb5bd',

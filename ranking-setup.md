@@ -41,4 +41,4 @@ const SHEET_API_URL = 'https://script.google.com/macros/s/AKfycbxxqxvYZRQafob5lh
 const SHEET_API_URL = 'https://script.google.com/macros/s/xxxxxxxxxxxxxxxxxxxx/exec';
 ```
 
-これで結果画面からスコア登録でき、タイトル画面の `RANKING TOP 10` から上位10件を見られます。
+これで結果画面からスコア登録でき、タイトル画面の `RANKING TOP 50` から上位50件を見られます（一覧はドラッグ／マウスホイールでスクロール）。
