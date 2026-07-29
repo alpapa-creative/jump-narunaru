@@ -27,7 +27,7 @@ Apps Scriptで `デプロイ > 新しいデプロイ > ウェブアプリ` を�
 
 ## 4. HTMLにURLを設定する
 
-`jump-narunaru.html` のこの行に、コピーしたURLを入れます。
+`index.html` のこの行に、コピーしたURLを入れます。
 
 ```js
 const SHEET_API_URL = 'https://script.google.com/macros/s/AKfycbxxqxvYZRQafob5lhhvf0bTEPwV7Ev-49ZDY6bfOyHehZXPyZvaYBzv2f1PhAiPMF5a/exec';
