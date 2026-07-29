@@ -73,7 +73,6 @@
     let time = TIME_LIMIT;
     let startTime = 0;
     let maxFloor = 0;
-    let bestFloor = Number(localStorage.getItem('sn46_best') || 0);
     let resultTime = 0;
     let resultType = "";
     let playerName = localStorage.getItem('jn46_player_name') || "";
@@ -570,10 +569,6 @@
         submittedScoreKey = '';
         isSubmittingScore = false;
         submitStatus = isRankingApiConfigured() ? 'ランキングに登録できます' : 'GAS URLを設定すると登録できます';
-        if (maxFloor > bestFloor) {
-            bestFloor = maxFloor;
-            localStorage.setItem('sn46_best', String(bestFloor));
-        }
     }
 
     // --- 称号判定 ---
@@ -1279,12 +1274,6 @@
             ctx.fillStyle = TEXT_COLOR;
             ctx.fillText(`FLOOR: ${maxFloor}F`, 15, 65);
             
-            if (bestFloor > 0) {
-                ctx.textAlign = 'right';
-                ctx.font = '700 16px "Montserrat", sans-serif';
-                ctx.fillText(`BEST: ${bestFloor}F`, WIDTH - 15, 35);
-            }
-
             if (showMissText > 0) {
                 ctx.fillStyle = ACCENT_COLOR;
                 ctx.textAlign = 'center';
@@ -1354,7 +1343,7 @@
                     fill: isSubmittingScore ? '#adb5bd' : (isRankingApiConfigured() ? ACCENT_COLOR : '#adb5bd'),
                     text: '#f8f9fa'
                 });
-                drawButton('resultRanking', 'RANKING TOP 10', 80, 444, 240, 38, { fill: TEXT_COLOR });
+                drawButton('resultRanking', 'RANKING', 80, 444, 240, 38, { fill: TEXT_COLOR });
                 drawButton('resultRestart', 'RESTART', 80, 494, 240, 38, { fill: '#f8f9fa', text: TEXT_COLOR, stroke: TEXT_COLOR });
             }
 
